@@ -1,4 +1,4 @@
-// (c) Copyright 2019-2025 OLX
+// (c) Copyright 2019-2026 OLX
 
 pub mod config;
 pub mod errors;
@@ -48,12 +48,6 @@ pub struct Watermark {
 pub struct Size {
     pub width: Option<i32>,
     pub height: Option<i32>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub enum WatermarkPosition {
-    Center,
-    Point,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -173,12 +167,6 @@ impl Default for Point {
 impl Default for ImageFormat {
     fn default() -> Self {
         ImageFormat::Jpeg
-    }
-}
-
-impl Default for WatermarkPosition {
-    fn default() -> Self {
-        WatermarkPosition::Point
     }
 }
 

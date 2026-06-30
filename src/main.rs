@@ -1,6 +1,7 @@
-// (c) Copyright 2019-2025 OLX
+// (c) Copyright 2019-2026 OLX
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 
 use axum::extract::Request;
@@ -10,9 +11,13 @@ use axum::response::IntoResponse;
 use axum::{routing::get, Router};
 use image_provider::{create_image_provider, ImageProvider};
 use libvips::VipsApp;
+use moka::future::Cache;
 
 use commons::config::Configuration;
 use routes::metric::HTTP_DURATION;
+
+#[cfg(feature = "opentelemetry")]
+use opentelemetry::trace::FutureExt;
 
 mod commons;
 mod image_processor;
@@ -72,6 +77,15 @@ fn create_vips_app(config: &Configuration) -> Option<VipsApp> {
     Some(app)
 }
 
+fn create_watermarks_cache(config: &Configuration) -> Cache<String, Arc<Vec<u8>>> {
+    let cache_size = config.watermark_cache_size.unwrap_or(15);
+    let ttl = Duration::from_secs(config.watermark_cache_ttl_seconds.unwrap_or(28800)); // 8 hours
+    Cache::builder()
+        .max_capacity(cache_size)
+        .time_to_live(ttl)
+        .build()
+}
+
 async fn start_management_server(config: &Configuration) {
     let app = Router::new()
         .route("/health", get(|| async { StatusCode::OK }))
@@ -87,6 +101,7 @@ pub struct AppState {
     vips_app: Arc<VipsApp>,
     image_provider: Arc<Box<dyn ImageProvider>>,
     config: Arc<Configuration>,
+    watermark_cache: Cache<String, Arc<Vec<u8>>>,
 }
 
 async fn measure_request_handling_duration(
@@ -94,7 +109,57 @@ async fn measure_request_handling_duration(
     next: Next,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let now = SystemTime::now();
+
+    #[cfg(feature = "opentelemetry")]
+    let res = {
+        let http_request_method = req.method().as_str().to_owned();
+        let http_route = req
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .map(|matched_path| matched_path.as_str().to_owned())
+            .unwrap_or_else(|| req.uri().path().to_owned());
+        let url_scheme = req.uri().scheme_str().unwrap_or("http").to_owned();
+        let url_path = req.uri().path().to_owned();
+        let server_address = req
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|host| host.to_str().ok())
+            .map(str::to_owned);
+        let network_protocol_version = match req.version() {
+            axum::http::Version::HTTP_10 => "1.0",
+            axum::http::Version::HTTP_11 => "1.1",
+            axum::http::Version::HTTP_2 => "2",
+            axum::http::Version::HTTP_3 => "3",
+            _ => "",
+        };
+
+        let otel_cx = commons::open_telemetry::start_http_server_span(
+            &http_request_method,
+            &http_route,
+            &url_scheme,
+            &url_path,
+            server_address.as_deref(),
+            network_protocol_version,
+        );
+        let res = next.run(req).with_context(otel_cx.clone()).await;
+        let duration = now
+            .elapsed()
+            .map(|elapsed| elapsed.as_secs_f64())
+            .unwrap_or_default();
+        commons::open_telemetry::finish_http_server_span(
+            &otel_cx,
+            &http_request_method,
+            &http_route,
+            &url_scheme,
+            res.status().as_u16(),
+            duration,
+        );
+        res
+    };
+
+    #[cfg(not(feature = "opentelemetry"))]
     let res = next.run(req).await;
+
     if let Ok(elapsed) = now.elapsed() {
         let duration =
             (elapsed.as_secs() as f64) + f64::from(elapsed.subsec_nanos()) / 1_000_000_000_f64;
@@ -113,6 +178,7 @@ async fn start_main_server(config: &Configuration) {
         vips_app: Arc::new(create_vips_app(&config).unwrap()),
         image_provider: Arc::new(create_image_provider(&config).await),
         config: Arc::new(config.clone()),
+        watermark_cache: create_watermarks_cache(&config),
     };
 
     let app = Router::new()

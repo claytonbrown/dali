@@ -1,3 +1,101 @@
+## [2.7.4](https://github.com/olxgroup-oss/dali/compare/v2.7.3...v2.7.4) (2026-06-30)
+
+
+### Bug Fixes
+
+* **otel:** optimize otel metrics exporter ([201f6e8](https://github.com/olxgroup-oss/dali/commit/201f6e86173b8d3c31d22041541a806a8c4b9604))
+
+## [2.7.3](https://github.com/olxgroup-oss/dali/compare/v2.7.2...v2.7.3) (2026-06-29)
+
+
+### Bug Fixes
+
+* **otel:** adds request duration boundaries ([c4ef819](https://github.com/olxgroup-oss/dali/commit/c4ef8196e77e368d81b1fac4982bb5a6cd7e22d3))
+
+## [2.7.2](https://github.com/olxgroup-oss/dali/compare/v2.7.1...v2.7.2) (2026-06-29)
+
+
+### Bug Fixes
+
+* **otel:** enhance otel metrics ([#131](https://github.com/olxgroup-oss/dali/issues/131)) ([51b6810](https://github.com/olxgroup-oss/dali/commit/51b68101c31a3a74497e23a2130407809975faae))
+
+## [2.7.1](https://github.com/olxgroup-oss/dali/compare/v2.7.0...v2.7.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* **otel:** fix otel and add enhanced logging for watermark caching ([2b3fac5](https://github.com/olxgroup-oss/dali/commit/2b3fac51180996c7ff0bd0aa7193abf4ed43ccd8))
+
+# [2.7.0](https://github.com/olxgroup-oss/dali/compare/v2.6.1...v2.7.0) (2026-06-29)
+
+
+### Features
+
+* **cache:** enable caching for watermarks ([#129](https://github.com/olxgroup-oss/dali/issues/129)) ([26dae92](https://github.com/olxgroup-oss/dali/commit/26dae9234e42bebfc94bec126113557f6bf28b5d))
+
+# [2.7.0](https://github.com/olxgroup-oss/dali/compare/v2.6.1...v2.7.0) (2026-06-29)
+
+
+### Features
+
+* **cache:** enable caching for watermarks ([#129](https://github.com/olxgroup-oss/dali/issues/129)) ([26dae92](https://github.com/olxgroup-oss/dali/commit/26dae9234e42bebfc94bec126113557f6bf28b5d))
+
+# [2.7.0](https://github.com/olxgroup-oss/dali/compare/v2.6.1...v2.7.0) (2026-06-29)
+
+
+### Features
+
+* **cache:** enable caching for watermarks ([#129](https://github.com/olxgroup-oss/dali/issues/129)) ([26dae92](https://github.com/olxgroup-oss/dali/commit/26dae9234e42bebfc94bec126113557f6bf28b5d))
+
+## [2.6.1](https://github.com/olxgroup-oss/dali/compare/v2.6.0...v2.6.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **optimization:** optimize memory allocation ([#128](https://github.com/olxgroup-oss/dali/issues/128)) ([0b2451c](https://github.com/olxgroup-oss/dali/commit/0b2451c3e9b01055e5cbd6c983a29c3b3314f59f))
+
+# [2.6.0](https://github.com/olxgroup-oss/dali/compare/v2.5.2...v2.6.0) (2026-06-19)
+
+
+### Features
+
+* **jemalloc:** switch to jemalloc ([#127](https://github.com/olxgroup-oss/dali/issues/127)) ([0072aee](https://github.com/olxgroup-oss/dali/commit/0072aeee2766f2f0c256f42f3001045352e1ca9d))
+
+## [2.5.2](https://github.com/olxgroup-oss/dali/compare/v2.5.1...v2.5.2) (2026-06-08)
+
+
+### Bug Fixes
+
+* **docker:** optimize multiarch docker build ([#125](https://github.com/olxgroup-oss/dali/issues/125)) ([05325c0](https://github.com/olxgroup-oss/dali/commit/05325c0bec4519e1a36531dfaf61e7ec905326a3))
+
+## [2.5.1](https://github.com/olxgroup-oss/dali/compare/v2.5.0...v2.5.1) (2026-06-02)
+
+
+### Bug Fixes
+
+* **docker:** switch docker-container driver ([cd9f99b](https://github.com/olxgroup-oss/dali/commit/cd9f99b9fa9598bf9c94898a6ae242a03529a1db))
+
+# [2.5.0](https://github.com/olxgroup-oss/dali/compare/v2.4.3...v2.5.0) (2026-06-02)
+
+
+### Features
+
+* **docker:** build iamges for multiple platforms ([#123](https://github.com/olxgroup-oss/dali/issues/123)) ([9ae01bb](https://github.com/olxgroup-oss/dali/commit/9ae01bbc02f8a1a33c8f4206b3e2dfd73a641d60))
+
+## [2.4.3](https://github.com/olxgroup-oss/dali/compare/v2.4.2...v2.4.3) (2026-06-02)
+
+
+### Bug Fixes
+
+* **opentelemetry:** fix open telemetry api ([#122](https://github.com/olxgroup-oss/dali/issues/122)) ([ac07d60](https://github.com/olxgroup-oss/dali/commit/ac07d60fba0273e60592aae07be2b14ed55d00c4))
+
+## [2.4.2](https://github.com/olxgroup-oss/dali/compare/v2.4.1...v2.4.2) (2026-06-02)
+
+
+### Bug Fixes
+
+* **dead-code:** cleanup dead code ([#120](https://github.com/olxgroup-oss/dali/issues/120)) ([f423a5f](https://github.com/olxgroup-oss/dali/commit/f423a5f8c414454b27a543d9136a9e32ddb8f8c3))
+
 # [2.4.0](https://github.com/olxgroup-oss/dali/compare/v2.3.0...v2.4.0) (2024-11-20)
 
 

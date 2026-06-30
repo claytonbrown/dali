@@ -3,11 +3,10 @@ pub mod s3 {
     use aws_config::default_provider::credentials::DefaultCredentialsChain;
     use aws_sdk_s3::config::Builder;
     use aws_sdk_s3::error::SdkError;
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode};
     use log::error;
     use std::collections::HashMap;
     use std::io::Write;
-    use thiserror::Error;
 
     use async_trait::async_trait;
     use aws_config::{BehaviorVersion, Region};
@@ -22,9 +21,6 @@ pub mod s3 {
         },
         ImageProvider,
     };
-
-    #[derive(Error, Debug)]
-    pub enum S3ProviderError {}
 
     pub struct S3ImageProvider {
         s3_client: aws_sdk_s3::Client,
@@ -52,7 +48,7 @@ pub mod s3 {
 
             let region = s3_region.as_ref().unwrap().clone();
             let mut s3_config = Builder::new()
-                .behavior_version(BehaviorVersion::v2023_11_09())
+                .behavior_version(BehaviorVersion::v2026_01_12())
                 .region(Region::new(region));
 
             if let (Some(key), Some(secret)) = (s3_key, s3_secret) {
@@ -145,7 +141,8 @@ pub mod s3 {
                     })
                     .collect(),
             };
-            let mut binary_payload: Vec<u8> = Vec::new();
+            let response_length = result.content_length().unwrap_or(0).max(0) as usize;
+            let mut binary_payload: Vec<u8> = Vec::with_capacity(response_length);
             let mut total_bytes = 0;
             while let Some(bytes) = result.body.try_next().await.map_err(|e| {
                 error!(

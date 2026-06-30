@@ -1,14 +1,16 @@
-// (c) Copyright 2019-2025 OLX
+// (c) Copyright 2019-2026 OLX
 #![cfg(feature = "opentelemetry")]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use log::error;
 use log::warn;
-use opentelemetry::metrics::Meter;
-use opentelemetry::{global, KeyValue};
+use opentelemetry::metrics::Histogram;
+use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider};
+use opentelemetry::{global, Context, Key, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_otlp::WithTonicConfig;
-use opentelemetry_sdk::trace::{Config, RandomIdGenerator, Sampler};
+use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use sysinfo::{MemoryRefreshKind, System};
 use tokio::{task, time};
@@ -16,7 +18,7 @@ use tonic::transport::ClientTlsConfig;
 
 use super::config::Configuration;
 
-pub const DEFAULT_OTEL_APPLICAITON_NAME: &str = "dali";
+const DEFAULT_OTEL_APPLICAITON_NAME: &str = "dali";
 
 pub async fn init_opentelemetry(config: &Configuration) {
     let otel_collector_endpoint = config.otel_collector_endpoint.clone();
@@ -30,7 +32,7 @@ pub async fn init_opentelemetry(config: &Configuration) {
         .unwrap_or(DEFAULT_OTEL_APPLICAITON_NAME.to_owned());
     let endpoint = otel_collector_endpoint.unwrap();
     init_global_tracer_provider(endpoint.clone(), otel_application_name.clone());
-    init_global_meter_provider(endpoint.clone(), otel_application_name.clone()).await;
+    init_global_meter_provider(endpoint, otel_application_name).await;
     schedule_memory_metrics().await;
 }
 
@@ -51,19 +53,13 @@ fn init_global_tracer_provider(otel_collector_endpoint: String, otel_application
         return;
     }
 
-    let trace_config = Config::default()
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter.unwrap())
         .with_sampler(Sampler::AlwaysOn)
         .with_id_generator(RandomIdGenerator::default())
         .with_max_events_per_span(64)
         .with_max_attributes_per_span(16)
-        .with_resource(Resource::new(vec![KeyValue::new(
-            "service.name",
-            otel_application_name,
-        )]));
-
-    let tracer_provider = opentelemetry_sdk::trace::TracerProvider::builder()
-        .with_batch_exporter(exporter.unwrap(), opentelemetry_sdk::runtime::Tokio)
-        .with_config(trace_config)
+        .with_resource(build_resource(otel_application_name))
         .build();
 
     global::set_tracer_provider(tracer_provider);
@@ -75,6 +71,7 @@ async fn init_global_meter_provider(
 ) {
     let exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
+        .with_temporality(opentelemetry_sdk::metrics::Temporality::Delta)
         .with_protocol(opentelemetry_otlp::Protocol::Grpc)
         .with_endpoint(otel_collector_endpoint)
         .with_tls_config(ClientTlsConfig::new().with_native_roots())
@@ -89,26 +86,167 @@ async fn init_global_meter_provider(
         return;
     }
 
-    let metrics_reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
-        exporter.unwrap(),
-        opentelemetry_sdk::runtime::Tokio,
-    )
-    .build();
+    let metrics_reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter.unwrap())
+        .build();
 
     let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_reader(metrics_reader)
-        .with_resource(Resource::new(vec![KeyValue::new(
-            "service.name",
-            otel_application_name,
-        )]))
+        .with_resource(build_resource(otel_application_name))
         .build();
 
     global::set_meter_provider(provider);
+
+    init_http_server_request_duration_metric();
+}
+
+static HTTP_SERVER_REQUEST_DURATION: OnceLock<Histogram<f64>> = OnceLock::new();
+
+const OTEL_INSTRUMENTATION_SCOPE_NAME: &str = "dali";
+
+fn build_resource(otel_application_name: String) -> Resource {
+    let hostname = System::host_name();
+
+    let detected = Resource::builder().build();
+    let has_host_name = detected.get(&Key::from_static_str("host.name")).is_some();
+    let has_instance_id = detected
+        .get(&Key::from_static_str("service.instance.id"))
+        .is_some();
+
+    let mut builder = Resource::builder().with_service_name(otel_application_name);
+
+    if !has_host_name {
+        if let Some(hostname) = hostname.clone() {
+            builder = builder.with_attribute(KeyValue::new("host.name", hostname));
+        }
+    }
+
+    if !has_instance_id {
+        let instance_id = match hostname {
+            Some(hostname) => format!("{hostname}-{}", std::process::id()),
+            None => std::process::id().to_string(),
+        };
+        builder = builder.with_attribute(KeyValue::new("service.instance.id", instance_id));
+    }
+
+    builder.build()
+}
+
+fn init_http_server_request_duration_metric() {
+    let meter = global::meter_provider().meter(OTEL_INSTRUMENTATION_SCOPE_NAME);
+    let histogram = meter
+        .f64_histogram("http.server.request.duration")
+        .with_unit("s")
+        .with_description("Duration of HTTP server requests.")
+        .with_boundaries(vec![
+            0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.25, 0.3, 0.4, 0.5,
+            0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+        ])
+        .build();
+    if HTTP_SERVER_REQUEST_DURATION.set(histogram).is_err() {
+        warn!("the http.server.request.duration metric has already been initialized");
+    }
+}
+
+pub fn start_http_server_span(
+    http_request_method: &str,
+    http_route: &str,
+    url_scheme: &str,
+    url_path: &str,
+    server_address: Option<&str>,
+    network_protocol_version: &str,
+) -> Context {
+    let tracer = global::tracer_provider().tracer(OTEL_INSTRUMENTATION_SCOPE_NAME);
+    let mut attributes = vec![
+        KeyValue::new("http.request.method", http_request_method.to_string()),
+        KeyValue::new("http.route", http_route.to_string()),
+        KeyValue::new("url.path", url_path.to_string()),
+        KeyValue::new("url.scheme", url_scheme.to_string()),
+    ];
+    if let Some(server_address) = server_address {
+        attributes.push(KeyValue::new("server.address", server_address.to_string()));
+    }
+    if !network_protocol_version.is_empty() {
+        attributes.push(KeyValue::new(
+            "network.protocol.version",
+            network_protocol_version.to_string(),
+        ));
+    }
+
+    let span = tracer
+        .span_builder(format!("{http_request_method} {http_route}"))
+        .with_kind(SpanKind::Server)
+        .with_attributes(attributes)
+        .start(&tracer);
+
+    Context::current_with_span(span)
+}
+
+pub fn finish_http_server_span(
+    otel_cx: &Context,
+    http_request_method: &str,
+    http_route: &str,
+    url_scheme: &str,
+    http_response_status_code: u16,
+    duration_seconds: f64,
+) {
+    let span = otel_cx.span();
+    span.set_attribute(KeyValue::new(
+        "http.response.status_code",
+        i64::from(http_response_status_code),
+    ));
+    if http_response_status_code >= 500 {
+        span.set_attribute(KeyValue::new(
+            "error.type",
+            http_response_status_code.to_string(),
+        ));
+        span.set_status(Status::error(format!(
+            "request failed with status code {http_response_status_code}"
+        )));
+    }
+    span.end();
+
+    record_http_server_request_duration(
+        http_request_method,
+        http_route,
+        url_scheme,
+        http_response_status_code,
+        duration_seconds,
+    );
+}
+
+fn record_http_server_request_duration(
+    http_request_method: &str,
+    http_route: &str,
+    url_scheme: &str,
+    http_response_status_code: u16,
+    duration_seconds: f64,
+) {
+    let Some(histogram) = HTTP_SERVER_REQUEST_DURATION.get() else {
+        return;
+    };
+
+    let mut attributes = vec![
+        KeyValue::new("http.request.method", http_request_method.to_string()),
+        KeyValue::new("http.route", http_route.to_string()),
+        KeyValue::new("url.scheme", url_scheme.to_string()),
+        KeyValue::new(
+            "http.response.status_code",
+            i64::from(http_response_status_code),
+        ),
+    ];
+    if http_response_status_code >= 500 {
+        attributes.push(KeyValue::new(
+            "error.type",
+            http_response_status_code.to_string(),
+        ));
+    }
+
+    histogram.record(duration_seconds, &attributes);
 }
 
 async fn schedule_memory_metrics() {
     let _memory_task = task::spawn(async {
-        let meter: Meter = global::meter_provider().meter("Dali - Memory Meter");
+        let meter = global::meter_provider().meter("Dali - Memory Meter");
 
         let used_memory_gauge = meter
             .u64_gauge("dali_used_memory_mb")
@@ -126,7 +264,7 @@ async fn schedule_memory_metrics() {
         loop {
             interval.tick().await;
 
-            system.refresh_memory_specifics(MemoryRefreshKind::new().with_ram());
+            system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
             free_memory_gauge.record(
                 system.free_memory() / 1_000_000,
                 &[KeyValue::new("type", "free")],

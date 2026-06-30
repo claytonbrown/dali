@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{FromRequest, Request, State},
@@ -7,20 +6,12 @@ use axum::{
 };
 use core::str;
 use futures::future::join_all;
-use log::{error, warn};
-#[cfg(feature = "opentelemetry")]
-use opentelemetry::{
-    global::{self, BoxedSpan, ObjectSafeSpan},
-    trace::{Status, Tracer, TracerProvider},
-    KeyValue,
-};
+use log::{debug, error, warn};
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
-
-#[cfg(feature = "opentelemetry")]
-use crate::commons::{open_telemetry::DEFAULT_OTEL_APPLICAITON_NAME};
 
 use crate::{
     commons::{ImageFormat, ProcessImageRequest},
@@ -39,15 +30,14 @@ const HEADERS_DETERMINED_BY_DALI: [&str; 2] = ["content-type", "content-length"]
 
 pub struct ProcessImageRequestExtractor<T>(pub T);
 
-#[async_trait]
-impl<B, T> FromRequest<B> for ProcessImageRequestExtractor<T>
+impl<S, T> FromRequest<S> for ProcessImageRequestExtractor<T>
 where
-    B: Send,
+    S: Send + Sync,
     T: DeserializeOwned + Send,
 {
     type Rejection = (StatusCode, String);
 
-    async fn from_request(req: Request, _state: &B) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
         let query = req.uri().query();
         if let Some(query) = query {
             let extracted_params = serde_qs::from_str(query);
@@ -135,35 +125,37 @@ pub async fn process_image(
         vips_app,
         image_provider,
         config,
+        watermark_cache,
     }): State<AppState>,
     ProcessImageRequestExtractor(params): ProcessImageRequestExtractor<ProcessImageRequest>,
 ) -> Result<Response<Body>, ImageProcessingError> {
-    #[cfg(feature = "opentelemetry")]
-    let tracer = global::tracer_provider().tracer("Dali - Image Processing Tracer");
-    #[cfg(feature = "opentelemetry")]
-    let mut span = tracer.start("ImageProcessing");
-    #[cfg(feature = "opentelemetry")]
-    {
-        let otel_application_name = config
-            .otel_application_name
-            .clone()
-            .unwrap_or(DEFAULT_OTEL_APPLICAITON_NAME.to_owned());
-        span.set_attribute(KeyValue::new("service.name", otel_application_name));
-        span.set_attribute(KeyValue::new("span.kind", "server"));
-        span.set_attribute(KeyValue::new("http.method", "GET"));
-    }
-
     let now = SystemTime::now();
     let main_img = image_provider
         .get_file(&params.image_address, &config)
         .await?;
     let mut total_input_size = main_img.bytes.len();
 
-    let watermarks_futures = params
-        .watermarks
-        .iter()
-        .map(|wm| image_provider.get_file(&wm.image_address, &config));
-    let watermarks = join_all(watermarks_futures)
+    let watermarks_futures = params.watermarks.iter().map(|wm| {
+        let cache = watermark_cache.clone();
+        let provider = image_provider.clone();
+        let cfg = config.clone();
+        let address = wm.image_address.clone();
+        async move {
+            // Check cache first
+            if let Some(cached) = cache.get(&address).await {
+                debug!("watermark cache hit for address: {}", address);
+                return Ok(cached);
+            }
+            debug!("watermark cache miss for address: {}", address);
+            // Cache miss — download
+            let result = provider.get_file(&address, &cfg).await?;
+            let bytes = Arc::new(result.bytes);
+            // Store in cache
+            cache.insert(address, Arc::clone(&bytes)).await;
+            Ok::<Arc<Vec<u8>>, ImageProcessingError>(bytes)
+        }
+    });
+    let watermarks: Vec<Arc<Vec<u8>>> = join_all(watermarks_futures)
         .await
         .into_iter()
         .filter(|r| {
@@ -176,9 +168,9 @@ pub async fn process_image(
             r.is_ok()
         })
         .map(|r| {
-            let watermark = r.unwrap();
-            total_input_size += watermark.bytes.len();
-            watermark.bytes
+            let watermark_bytes = r.unwrap();
+            total_input_size += watermark_bytes.len();
+            watermark_bytes
         })
         .collect();
 
@@ -201,27 +193,16 @@ pub async fn process_image(
     let processed_image = recv.await.map_err(|e| {
         let error_message = format!("failed to join the thread which process the image. error: {}", e);
         error!("{}", error_message);
-        #[cfg(feature = "opentelemetry")] {
-            span.set_status(Status::error(error_message));
-            span.end();
-        }
         ImageProcessingError::ProcessingWorkerJoinError
     })?
     .map_err(|e| {
         let error_message = format!("the image processing has failed for the resource with the error: {}. libvips raw error is: {}",
             e, vips_app.error_buffer().unwrap_or("").replace("\n", ". "));
         error!("{}", error_message);
-        #[cfg(feature = "opentelemetry")] {
-            span.set_status(Status::error(error_message));
-            span.end();
-        }
         ImageProcessingError::LibvipsProcessingFailed(e)
     })?;
 
-    #[cfg(not(feature = "opentelemetry"))]
     log_size_metrics(&format, total_input_size, processed_image.len());
-    #[cfg(feature = "opentelemetry")]
-    log_size_metrics_with_otel(&format, total_input_size, processed_image.len(), &mut span);
 
     let mut response_builder = Response::builder().status(StatusCode::OK);
     for (key, value) in main_img.response_headers.into_iter() {
@@ -230,18 +211,12 @@ pub async fn process_image(
         }
     }
 
-    #[cfg(feature = "opentelemetry")]
-    {
-        span.set_status(Status::Ok);
-        span.end();
-    }
     Ok(response_builder
         .header("Content-Type", format!("image/{}", format))
         .body(Body::from(processed_image))
         .unwrap())
 }
 
-#[cfg(not(feature = "opentelemetry"))]
 fn log_size_metrics(format: &ImageFormat, input_size: usize, response_length: usize) {
     match format {
         ImageFormat::Jpeg => {
@@ -257,38 +232,6 @@ fn log_size_metrics(format: &ImageFormat, input_size: usize, response_length: us
             OUTPUT_SIZE.webp.observe(response_length as f64);
         }
         ImageFormat::Png => {
-            INPUT_SIZE.png.observe(input_size as f64);
-            OUTPUT_SIZE.png.observe(response_length as f64);
-        }
-    }
-}
-
-#[cfg(feature = "opentelemetry")]
-fn log_size_metrics_with_otel(
-    format: &ImageFormat,
-    input_size: usize,
-    response_length: usize,
-    span: &mut BoxedSpan,
-) {
-    span.set_attribute(KeyValue::new("content-length", response_length as f64));
-    match format {
-        ImageFormat::Jpeg => {
-            span.set_attribute(KeyValue::new("content-type", "jpeg"));
-            INPUT_SIZE.jpeg.observe(input_size as f64);
-            OUTPUT_SIZE.jpeg.observe(response_length as f64);
-        }
-        ImageFormat::Heic => {
-            span.set_attribute(KeyValue::new("content-type", "heic"));
-            INPUT_SIZE.heic.observe(input_size as f64);
-            OUTPUT_SIZE.heic.observe(response_length as f64);
-        }
-        ImageFormat::Webp => {
-            span.set_attribute(KeyValue::new("content-type", "webp"));
-            INPUT_SIZE.webp.observe(input_size as f64);
-            OUTPUT_SIZE.webp.observe(response_length as f64);
-        }
-        ImageFormat::Png => {
-            span.set_attribute(KeyValue::new("content-type", "png"));
             INPUT_SIZE.png.observe(input_size as f64);
             OUTPUT_SIZE.png.observe(response_length as f64);
         }
